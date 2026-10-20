@@ -1,0 +1,31 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: 'IBM Plex Sans', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* tabular nums for metrics / tables */
+.ant-statistic-content-value,
+.ant-table {
+  font-variant-numeric: tabular-nums;
+}
+
+code,
+.ant-typography code {
+  font-family: 'IBM Plex Mono', 'SF Mono', ui-monospace, monospace;
+}

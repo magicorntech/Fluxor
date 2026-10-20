@@ -1,0 +1,1557 @@
+openapi: 3.0.3
+info:
+  title: Fluxor API
+  version: 0.6.0
+  description: |
+    Fluxor server API. The dashboard talks only to this API; it never connects to clusters directly.
+
+    **Authentication.** `POST /api/v1/auth/login` returns a short-lived access token (send it as
+    `Authorization: Bearer <token>`) and sets an HttpOnly refresh cookie. `POST /api/v1/auth/refresh`
+    exchanges the cookie for a new access token and rotates the cookie. Every route except the ones
+    marked as public requires an access token.
+
+    **API tokens.** Scripts can send an API token (`flx_...`, see `/api/v1/tokens`) instead of an access
+    token, in the same `Authorization: Bearer` header. A token acts as its owner with exactly the owner's
+    permissions. It cannot be used to create or delete tokens or to change the password.
+
+    **Rate limits.** Sign-in and token refresh are limited per client address; over the limit the server
+    answers 429 `rate_limited` with a `Retry-After` header (seconds).
+
+    **Audit log.** Every change, and every refused attempt to change something by a signed-in user, is
+    recorded (`GET /api/v1/audit`, needs `audit:view`). Reads are not recorded. The log never contains
+    passwords, tokens or hashes.
+
+    **Authorization.** Access is granted by role bindings: a role (a set of permissions) given to a user
+    within a scope (all clusters/applications, one, or a resource group). A role can be granted to a team,
+    which gives it to every member. Grants only add up; nothing denies.
+    A user sees only the clusters they may view: lists are filtered, and a cluster they may not view
+    answers 404 exactly like one that does not exist. Seeing a resource without the right to change it
+    answers 403 `forbidden`. User management and access control need the administrator role.
+servers:
+  - url: http://localhost:8080
+tags:
+  - name: system
+  - name: auth
+  - name: clusters
+  - name: users
+  - name: teams
+  - name: groups
+  - name: access
+  - name: tokens
+  - name: audit
+
+security:
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      tags: [system]
+      operationId: getHealth
+      summary: Liveness probe (public)
+      security: []
+      responses:
+        "200":
+          description: Server is up
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: Sign in with username and password (public)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginInput"
+      responses:
+        "200":
+          description: Signed in. Sets the `fluxor_refresh` cookie.
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [auth]
+      operationId: refresh
+      summary: Get a new access token using the refresh cookie (public, cookie-authenticated)
+      description: Each refresh token works once; the response sets a new cookie.
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RequestHeader"
+      responses:
+        "200":
+          description: New access token. Rotates the `fluxor_refresh` cookie.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: End the current session (public, cookie-authenticated)
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RequestHeader"
+      responses:
+        "204":
+          description: Signed out; the refresh cookie is cleared.
+        "403":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      operationId: getMe
+      summary: The signed-in user
+      responses:
+        "200":
+          description: The user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/auth/password:
+    put:
+      tags: [auth]
+      operationId: changePassword
+      summary: Change the signed-in user's password
+      description: |
+        Ends all other sessions of the user and returns a fresh session for the caller.
+        Allowed even while `mustChangePassword` is true; every other route returns
+        403 `password_change_required` until the password has been changed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordInput"
+      responses:
+        "200":
+          description: Password changed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/clusters:
+    get:
+      tags: [clusters]
+      operationId: listClusters
+      summary: List registered clusters
+      responses:
+        "200":
+          description: Clusters, sorted by name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterList"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [clusters]
+      operationId: createCluster
+      summary: Register a cluster
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClusterInput"
+      responses:
+        "201":
+          description: Cluster registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Cluster"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/clusters/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ClusterId"
+    get:
+      tags: [clusters]
+      operationId: getCluster
+      summary: Get a cluster
+      responses:
+        "200":
+          description: The cluster
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Cluster"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [clusters]
+      operationId: deleteCluster
+      summary: Remove a cluster
+      responses:
+        "204":
+          description: Cluster removed
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/tokens:
+    get:
+      tags: [tokens]
+      operationId: listTokens
+      summary: List your API tokens
+      description: Needs a signed-in session; an API token cannot list tokens. Secrets are never included.
+      responses:
+        "200":
+          description: Your tokens, newest first
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiTokenList"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [tokens]
+      operationId: createToken
+      summary: Create an API token
+      description: |
+        The secret is returned once, in `token`, and cannot be read again. The token has your permissions
+        and expires after `expiresInDays` (default 30, at most 365). You can hold at most 20 tokens.
+        Needs a signed-in session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApiTokenInput"
+      responses:
+        "201":
+          description: Token created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedApiToken"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/tokens/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    delete:
+      tags: [tokens]
+      operationId: deleteToken
+      summary: Delete one of your API tokens
+      description: A token that is not yours answers 404, like one that does not exist. Needs a signed-in session.
+      responses:
+        "204":
+          description: Token deleted; it stops working at once.
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/audit:
+    get:
+      tags: [audit]
+      operationId: listAuditEvents
+      summary: Read the audit log (needs `audit:view`)
+      description: |
+        Newest first. Page through it by passing `nextCursor` from one response as `cursor` in the next.
+      parameters:
+        - name: actor
+          in: query
+          description: User ID.
+          schema:
+            type: string
+        - name: action
+          in: query
+          description: Exact action name, for example `user.create`.
+          schema:
+            type: string
+        - name: result
+          in: query
+          schema:
+            $ref: "#/components/schemas/AuditResult"
+        - name: from
+          in: query
+          description: Only events at or after this time (RFC 3339).
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: Only events before this time (RFC 3339).
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: A page of events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditEventList"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/users:
+    get:
+      tags: [users]
+      operationId: listUsers
+      summary: List users (needs `user:manage`)
+      responses:
+        "200":
+          description: Users, sorted by username
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUserList"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [users]
+      operationId: createUser
+      summary: Create a user (needs `user:manage`)
+      description: |
+        The new user must change the password at first login. Without `password` a random temporary
+        password is generated and returned once as `temporaryPassword`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUserInput"
+      responses:
+        "201":
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateUserResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/users/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UserId"
+    get:
+      tags: [users]
+      operationId: getUser
+      summary: Get a user (needs `user:manage`)
+      responses:
+        "200":
+          description: The user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUser"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    patch:
+      tags: [users]
+      operationId: updateUser
+      summary: Update a user's profile or disable/enable the account (needs `user:manage`)
+      description: |
+        Only the fields present are changed. Disabling a user ends their access at once. Administrators
+        cannot disable their own account.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateUserInput"
+      responses:
+        "200":
+          description: The updated user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUser"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/users/{id}/reset-password:
+    parameters:
+      - $ref: "#/components/parameters/UserId"
+    post:
+      tags: [users]
+      operationId: resetUserPassword
+      summary: Set a temporary password for a user (needs `user:manage`)
+      description: |
+        The user must change it at next login, any lockout is cleared and all their sessions end.
+        Without `password` a random one is generated and returned once. Not allowed for your own account.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResetPasswordInput"
+      responses:
+        "200":
+          description: Password reset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResetPasswordResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/teams:
+    get:
+      tags: [teams]
+      operationId: listTeams
+      summary: List teams (needs `team:manage`)
+      responses:
+        "200":
+          description: Teams, sorted by name (ignoring case)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamList"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [teams]
+      operationId: createTeam
+      summary: Create a team (needs `team:manage`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeamInput"
+      responses:
+        "201":
+          description: Team created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/teams/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    get:
+      tags: [teams]
+      operationId: getTeam
+      summary: Get a team (needs `team:manage`)
+      responses:
+        "200":
+          description: The team
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    patch:
+      tags: [teams]
+      operationId: updateTeam
+      summary: Rename a team or change its description (needs `team:manage`)
+      description: Members are changed with the members endpoint, not here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RenameInput"
+      responses:
+        "200":
+          description: The updated team
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [teams]
+      operationId: deleteTeam
+      summary: Delete a team and the role bindings granted to it (needs `team:manage`)
+      description: Refused with 409 `last_admin` if the team's members are the last active administrators.
+      responses:
+        "204":
+          description: Team deleted
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/teams/{id}/members:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    put:
+      tags: [teams]
+      operationId: setTeamMembers
+      summary: Replace the members of a team (needs `team:manage`)
+      description: |
+        Takes effect immediately: members gain the team's roles and removed users lose them at their next
+        request. Refused with 409 `last_admin` if it would leave no active administrator.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MembersInput"
+      responses:
+        "200":
+          description: The team with its new members
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/resource-groups:
+    get:
+      tags: [groups]
+      operationId: listResourceGroups
+      summary: List resource groups (needs `group:manage`)
+      parameters:
+        - name: kind
+          in: query
+          schema:
+            $ref: "#/components/schemas/GroupKind"
+      responses:
+        "200":
+          description: Groups, sorted by name (ignoring case)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceGroupList"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [groups]
+      operationId: createResourceGroup
+      summary: Create a resource group (needs `group:manage`)
+      description: Only cluster groups can be created for now; application groups are not available yet.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResourceGroupInput"
+      responses:
+        "201":
+          description: Group created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceGroup"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/resource-groups/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    get:
+      tags: [groups]
+      operationId: getResourceGroup
+      summary: Get a resource group (needs `group:manage`)
+      responses:
+        "200":
+          description: The group
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceGroup"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    patch:
+      tags: [groups]
+      operationId: updateResourceGroup
+      summary: Rename a group or change its description (needs `group:manage`)
+      description: The kind and the members cannot be changed here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RenameInput"
+      responses:
+        "200":
+          description: The updated group
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceGroup"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [groups]
+      operationId: deleteResourceGroup
+      summary: Delete a group and the role bindings that point at it (needs `group:manage`)
+      responses:
+        "204":
+          description: Group deleted
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/resource-groups/{id}/members:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    put:
+      tags: [groups]
+      operationId: setResourceGroupMembers
+      summary: Replace the members of a group (needs `group:manage`)
+      description: |
+        Members are resource IDs (cluster IDs for a cluster group) and must exist. Takes effect
+        immediately for every role binding that is scoped to the group. A cluster that is deleted
+        leaves its groups automatically.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MembersInput"
+      responses:
+        "200":
+          description: The group with its new members
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceGroup"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/roles:
+    get:
+      tags: [access]
+      operationId: listRoles
+      summary: List the built-in roles (needs `rbac:manage`)
+      responses:
+        "200":
+          description: Roles with their permissions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleList"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/role-bindings:
+    get:
+      tags: [access]
+      operationId: listRoleBindings
+      summary: List role bindings (needs `rbac:manage`)
+      parameters:
+        - name: subjectKind
+          in: query
+          description: Must be given together with `subjectId`.
+          schema:
+            $ref: "#/components/schemas/SubjectKind"
+        - name: subjectId
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Bindings in creation order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BindingList"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [access]
+      operationId: createRoleBinding
+      summary: Grant a role to a user within a scope (needs `rbac:manage`)
+      description: |
+        The subject is a user or a team. A missing scope dimension means "all"; the cluster dimension can
+        also be one cluster or a cluster group. Roles with system permissions (`admin`) cannot be limited
+        to a scope, and roles without application permissions (`cluster-admin`) cannot be limited by
+        application. Application scopes and application groups are not available yet.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BindingInput"
+      responses:
+        "201":
+          description: Binding created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Binding"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/role-bindings/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      tags: [access]
+      operationId: deleteRoleBinding
+      summary: Remove a role binding (needs `rbac:manage`)
+      description: Refused with 409 `last_admin` if it would leave no active administrator.
+      responses:
+        "204":
+          description: Binding removed
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: fluxor_refresh
+
+  parameters:
+    ClusterId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    UserId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    RequestHeader:
+      name: X-Fluxor-Request
+      in: header
+      required: true
+      description: |
+        Any non-empty value. Required on cookie-authenticated requests (CSRF defence): a cross-site
+        request cannot set a custom header.
+      schema:
+        type: string
+        example: "1"
+
+  responses:
+    RateLimited:
+      description: Too many attempts from this address.
+      headers:
+        Retry-After:
+          description: Seconds to wait before trying again.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Error:
+      description: Error. Codes include `invalid_argument`, `invalid_credentials`, `invalid_current_password`,
+        `unauthenticated`, `password_change_required`, `forbidden`, `not_found`, `already_exists`, `last_admin`, `limit_reached`, `rate_limited`, `internal`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    Health:
+      type: object
+      required: [status, version]
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string
+          example: 0.0.0-dev
+
+    LoginInput:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          format: password
+
+    ChangePasswordInput:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword:
+          type: string
+          format: password
+        newPassword:
+          type: string
+          format: password
+          minLength: 12
+          maxLength: 256
+
+    TeamRef:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+
+    User:
+      type: object
+      description: |
+        The signed-in user. `permissions` and `canCreateClusters` are meant for showing or hiding parts of
+        a UI; the server checks every request again.
+      required: [id, username, mustChangePassword, teams, permissions, canCreateClusters]
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        email:
+          type: string
+        displayName:
+          type: string
+        mustChangePassword:
+          type: boolean
+        teams:
+          type: array
+          description: Teams the user belongs to.
+          items:
+            $ref: "#/components/schemas/TeamRef"
+        permissions:
+          type: array
+          description: |
+            System permissions the user holds (`user:manage`, `team:manage`, `group:manage`, `rbac:manage`,
+            `audit:view`). What they may do with a given cluster is in that cluster's `permissions`.
+          items:
+            $ref: "#/components/schemas/Permission"
+        canCreateClusters:
+          type: boolean
+          description: Whether the user may register new clusters.
+
+    Session:
+      type: object
+      required: [accessToken, expiresAt, user]
+      properties:
+        accessToken:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+          description: When the access token expires; refresh before then.
+        user:
+          $ref: "#/components/schemas/User"
+
+    AdminUser:
+      type: object
+      required: [id, username, disabled, mustChangePassword, createdAt]
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        email:
+          type: string
+        displayName:
+          type: string
+        disabled:
+          type: boolean
+        mustChangePassword:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        createdBy:
+          type: string
+          description: ID of the user who created the account, or `bootstrap`.
+        lastLoginAt:
+          type: string
+          format: date-time
+
+    AdminUserList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminUser"
+
+    CreateUserInput:
+      type: object
+      required: [username]
+      properties:
+        username:
+          type: string
+          description: 3-64 characters of lowercase letters, digits, '.', '_' and '-'; stored lowercase.
+        email:
+          type: string
+        displayName:
+          type: string
+          maxLength: 100
+        password:
+          type: string
+          format: password
+          minLength: 12
+          maxLength: 256
+          description: Temporary password. Omit to have one generated.
+
+    CreateUserResponse:
+      allOf:
+        - $ref: "#/components/schemas/AdminUser"
+        - type: object
+          properties:
+            temporaryPassword:
+              type: string
+              description: Present only when the password was generated. It cannot be read again.
+
+    UpdateUserInput:
+      type: object
+      properties:
+        displayName:
+          type: string
+          maxLength: 100
+        email:
+          type: string
+          description: Empty string removes the email.
+        disabled:
+          type: boolean
+
+    ResetPasswordInput:
+      type: object
+      properties:
+        password:
+          type: string
+          format: password
+          minLength: 12
+          maxLength: 256
+          description: Temporary password. Omit to have one generated.
+
+    ResetPasswordResponse:
+      type: object
+      properties:
+        temporaryPassword:
+          type: string
+          description: Present only when the password was generated. It cannot be read again.
+
+    Team:
+      type: object
+      required: [id, name, members, createdAt]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        members:
+          type: array
+          description: IDs of the member users, sorted.
+          items:
+            type: string
+        createdAt:
+          type: string
+          format: date-time
+        createdBy:
+          type: string
+
+    TeamList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Team"
+
+    TeamInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Unique ignoring case; no leading or trailing spaces.
+        description:
+          type: string
+          maxLength: 500
+        members:
+          type: array
+          maxItems: 1000
+          items:
+            type: string
+
+    RenameInput:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        description:
+          type: string
+          maxLength: 500
+
+    MembersInput:
+      type: object
+      required: [members]
+      properties:
+        members:
+          type: array
+          maxItems: 1000
+          description: The complete new member list; use an empty list to remove everyone.
+          items:
+            type: string
+
+    GroupKind:
+      type: string
+      enum: [cluster, application]
+
+    ResourceGroup:
+      type: object
+      required: [id, kind, name, members, createdAt]
+      properties:
+        id:
+          type: string
+        kind:
+          $ref: "#/components/schemas/GroupKind"
+        name:
+          type: string
+        description:
+          type: string
+        members:
+          type: array
+          description: IDs of the member resources (clusters for a cluster group), sorted.
+          items:
+            type: string
+        createdAt:
+          type: string
+          format: date-time
+        createdBy:
+          type: string
+
+    ResourceGroupList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ResourceGroup"
+
+    ResourceGroupInput:
+      type: object
+      required: [kind, name]
+      properties:
+        kind:
+          $ref: "#/components/schemas/GroupKind"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Unique per kind, ignoring case.
+        description:
+          type: string
+          maxLength: 500
+        members:
+          type: array
+          maxItems: 1000
+          items:
+            type: string
+
+    ApiToken:
+      type: object
+      required: [id, userId, name, prefix, createdAt, expiresAt]
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        name:
+          type: string
+        prefix:
+          type: string
+          description: The first characters of the secret, to recognize the token in a list.
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        lastUsedAt:
+          type: string
+          format: date-time
+          description: Updated at most once a minute.
+
+    ApiTokenList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApiToken"
+
+    ApiTokenInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        expiresInDays:
+          type: integer
+          minimum: 1
+          maximum: 365
+          default: 30
+
+    CreatedApiToken:
+      allOf:
+        - $ref: "#/components/schemas/ApiToken"
+        - type: object
+          required: [token]
+          properties:
+            token:
+              type: string
+              description: The secret, starting with `flx_`. Shown only now.
+
+    AuditResult:
+      type: string
+      enum: [success, denied, failure, error]
+      description: |
+        `denied` is a refusal because nobody was signed in, the user was not allowed, or a rate limit was hit;
+        `failure` any other refusal (validation, conflict, not found); `error` a server failure.
+
+    AuditEvent:
+      type: object
+      required: [id, time, action, result, status, details]
+      properties:
+        id:
+          type: string
+        time:
+          type: string
+          format: date-time
+        actorId:
+          type: string
+          description: Empty when nobody was signed in (a failed login).
+        actorName:
+          type: string
+          description: The username at the time; for a failed login, the name that was tried.
+        action:
+          type: string
+          example: user.create
+        subject:
+          type: string
+          description: What it was about, as `kind:id`.
+          example: cluster:ab12cd34
+        subjectName:
+          type: string
+          description: The subject's name at the time; a deleted subject cannot be looked up later.
+        result:
+          $ref: "#/components/schemas/AuditResult"
+        status:
+          type: integer
+          description: HTTP status of the response.
+        ip:
+          type: string
+        details:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            A few facts about the action, for example `reason` for a failed login, `role`, `to` and `scope` for a grant,
+            `fields` for an update, `via: api_token` when an API token was used. Never secrets.
+
+    AuditEventList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditEvent"
+        nextCursor:
+          type: string
+          description: Present when there are older events; pass it as `cursor` to get them.
+
+    Permission:
+      type: string
+      description: A capability, written resource:action. `*` stands for all of them.
+      example: cluster:view
+
+    Role:
+      type: object
+      required: [id, name, description, builtin, permissions]
+      properties:
+        id:
+          type: string
+          enum: [viewer, deployer, maintainer, cluster-admin, admin]
+        name:
+          type: string
+        description:
+          type: string
+        builtin:
+          type: boolean
+        permissions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Permission"
+
+    RoleList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Role"
+
+    SubjectKind:
+      type: string
+      enum: [user, team]
+
+    Subject:
+      type: object
+      required: [kind, id]
+      properties:
+        kind:
+          $ref: "#/components/schemas/SubjectKind"
+        id:
+          type: string
+
+    RefKind:
+      type: string
+      enum: [any, id, group]
+
+    Ref:
+      type: object
+      required: [kind]
+      description: Selects resources of one kind. `any` has no id; `id` and `group` need one.
+      properties:
+        kind:
+          $ref: "#/components/schemas/RefKind"
+        id:
+          type: string
+
+    Scope:
+      type: object
+      required: [cluster, application]
+      properties:
+        cluster:
+          $ref: "#/components/schemas/Ref"
+        application:
+          $ref: "#/components/schemas/Ref"
+
+    ScopeInput:
+      type: object
+      description: Each dimension defaults to `any` when omitted.
+      properties:
+        cluster:
+          $ref: "#/components/schemas/Ref"
+        application:
+          $ref: "#/components/schemas/Ref"
+
+    BindingInput:
+      type: object
+      required: [subject, roleId]
+      properties:
+        subject:
+          $ref: "#/components/schemas/Subject"
+        roleId:
+          type: string
+        scope:
+          $ref: "#/components/schemas/ScopeInput"
+
+    Binding:
+      type: object
+      required: [id, subject, roleId, scope, createdAt]
+      properties:
+        id:
+          type: string
+        subject:
+          $ref: "#/components/schemas/Subject"
+        roleId:
+          type: string
+        scope:
+          $ref: "#/components/schemas/Scope"
+        createdAt:
+          type: string
+          format: date-time
+        createdBy:
+          type: string
+
+    BindingList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Binding"
+
+    ClusterStatus:
+      type: string
+      enum: [Unknown, Connected, Unreachable]
+
+    ClusterInput:
+      type: object
+      required: [name, apiServer]
+      properties:
+        name:
+          type: string
+          description: DNS-label style name, unique across clusters.
+          example: prod-eu
+        apiServer:
+          type: string
+          format: uri
+          example: https://10.0.0.1:6443
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+
+    Cluster:
+      type: object
+      required: [id, name, apiServer, labels, status, createdAt, permissions]
+      properties:
+        permissions:
+          type: array
+          description: What the signed-in user may do with this cluster (`cluster:view`, `cluster:manage`).
+          items:
+            $ref: "#/components/schemas/Permission"
+        id:
+          type: string
+        name:
+          type: string
+        apiServer:
+          type: string
+          format: uri
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        status:
+          $ref: "#/components/schemas/ClusterStatus"
+        version:
+          type: string
+          description: Kubernetes server version, empty until the first successful connection.
+        createdAt:
+          type: string
+          format: date-time
+
+    ClusterList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Cluster"
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              example: invalid_argument
+            message:
+              type: string

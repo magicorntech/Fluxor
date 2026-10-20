@@ -1,0 +1,9 @@
+bin/
+dist/
+node_modules/
+dashboard/dist/
+*.test
+coverage.out
+.DS_Store
+.env
+.dev-secret
